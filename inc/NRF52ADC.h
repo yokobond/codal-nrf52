@@ -65,7 +65,8 @@ private:
     int16_t             bufferSize;
     volatile uint8_t    status;
     uint8_t             channel;
- 
+    uint8_t             input;
+
 public:
     DataStream      output;
 
@@ -74,6 +75,36 @@ public:
      * @param channel The analog identifier of this channel
      */
     NRF52ADCChannel(uint8_t channel);
+
+    /**
+     * @brief Get the input pin selection
+     * 
+     * @return int
+     */
+    int getInput();
+
+    /**
+     * @brief Set the Input pin selection
+     * 
+     * @param pin Pin selection to set. 
+     * @return int 
+     */
+    int setInput(int pin);
+
+    /**
+     * @brief Whether this is used to probe VDD or not.
+     *
+     * @return true VDD.
+     * @return false Not VDD.
+     */
+    bool isForVDD();
+
+    /**
+     * @brief Reset to the default parameters.
+     *
+     * @return DEVICE_OK
+     */
+    int reset();
 
     /**
      * Enable this component
@@ -255,6 +286,13 @@ public:
      */
     int releaseChannel(Pin& pin);
 
+    /**
+     * @brief Get volts of VDD.
+     * 
+     * @param probeChannel SAADC channel to be used for VDD.
+     * @return float Volts of VDD.
+     */
+    float getVDD(uint8_t probeChannel);
 };
 
 #endif

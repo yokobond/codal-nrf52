@@ -29,6 +29,8 @@ DEALINGS IN THE SOFTWARE.
 #include "nrf.h"
 #include "cmsis.h"
 
+#include "nrfx_saadc.h"
+
 // Calculation to determine the optimal usable space for a DMA buffer for the given number of channels
 #define NRF52ADC_DMA_ALIGNED_SIZED(c)   ((bufferSize - (bufferSize % (c * 2 * softwareOversample)))/2);
 
@@ -64,6 +66,7 @@ extern "C" void SAADC_IRQHandler()
  */
 NRF52ADCChannel::NRF52ADCChannel(uint8_t channel) : output(*this)
 {
+    this->input = channel + 1;
     this->channel = channel;
     this->size = buffer.length();
     this->bufferSize = NRF52_ADC_DMA_SIZE;
@@ -74,6 +77,54 @@ NRF52ADCChannel::NRF52ADCChannel(uint8_t channel) : output(*this)
 
     // Define our output stream as non-blocking.
     output.setBlocking(false);
+}
+
+/**
+ * @brief Get the input pin selection.
+ *
+ * @return int
+ */
+int NRF52ADCChannel::getInput()
+{
+    return input;
+}
+
+/**
+ * @brief Set the Input pin selection.
+ *
+ * @param pin
+ * @return DEVICE_OK, or DEVICE_INVALID_PARAMETER
+ */
+int NRF52ADCChannel::setInput(int pin)
+{
+    if (pin < NRF_SAADC_INPUT_DISABLED || pin > NRF_SAADC_INPUT_VDD)
+        return DEVICE_INVALID_PARAMETER;
+
+    this->input = pin;
+    return DEVICE_OK;
+}
+
+/**
+ * @brief Whether this is used to probe VDD or not.
+ * 
+ * @return true VDD.
+ * @return false Not VDD.
+ */
+bool NRF52ADCChannel::isForVDD()
+{
+    return NRF_SAADC_INPUT_VDD == input;
+}
+
+/**
+ * @brief Reset to the default parameters.
+ * 
+ * @return DEVICE_OK
+ */
+int NRF52ADCChannel::reset()
+{
+    this->input = this->channel + 1;
+    this->setGain();
+    return DEVICE_OK;
 }
 
 /**
@@ -130,7 +181,7 @@ int NRF52ADCChannel::servicePendingRequests()
 
     if (status & NRF52_ADC_CHANNEL_STATUS_AWAIT_ENABLE)
     {
-        NRF_SAADC->CH[channel].PSELP = channel+1;
+        NRF_SAADC->CH[channel].PSELP = input;
         NRF_SAADC->CH[channel].PSELN = 0;
         status &= ~NRF52_ADC_CHANNEL_STATUS_AWAIT_ENABLE;
         status |= NRF52_ADC_CHANNEL_STATUS_ENABLED;
@@ -630,6 +681,10 @@ NRF52ADCChannel* NRF52ADC::getChannel(Pin& pin)
 
     c = nrf52_saadc_id.get(pin.name) - 1;
 
+    // Reset to default parameters if the channel is used to probe VDD.
+    if (channels[c].isForVDD())
+        channels[c].reset();
+
     if (!channels[c].isEnabled())
     {
         channels[c].enable();
@@ -675,3 +730,51 @@ int NRF52ADC::releaseChannel(Pin& pin)
     return DEVICE_OK;
 }
 
+/**
+ * @brief Get volts of VDD.
+ *
+ * @param probeChannel SAADC channel to be used for VDD.
+ * @return float Volts of VDD.
+ */
+float NRF52ADC::getVDD(uint8_t probeChannel)
+{
+    bool wasEnabled = channels[probeChannel].isEnabled();
+
+    // Setup for VDD.
+    channels[probeChannel].setInput(NRF_SAADC_INPUT_VDD);
+    NRF_SAADC->CH[probeChannel].CONFIG =
+        (SAADC_CH_CONFIG_RESP_Bypass << SAADC_CH_CONFIG_RESP_Pos) |
+        (SAADC_CH_CONFIG_RESN_Bypass << SAADC_CH_CONFIG_RESN_Pos) |
+        (SAADC_CH_CONFIG_GAIN_Gain1_6 << SAADC_CH_CONFIG_GAIN_Pos) |
+        (SAADC_CH_CONFIG_REFSEL_Internal << SAADC_CH_CONFIG_REFSEL_Pos) |
+        (SAADC_CH_CONFIG_TACQ_3us << SAADC_CH_CONFIG_TACQ_Pos) |
+        (SAADC_CH_CONFIG_BURST_Disabled << SAADC_CH_CONFIG_BURST_Pos);
+    if (!wasEnabled)
+    {
+        channels[probeChannel].enable();
+        enabledChannels++;
+
+        // If this is the first channel enabled, enable the ADC.
+        // Otherwise, signal a STOP event to restart the ADC
+        // with this new channel included.
+
+        if (enabledChannels == 1)
+        {
+            channels[probeChannel].servicePendingRequests();
+            this->enable();
+        }
+        else
+        {
+            NRF_SAADC->TASKS_STOP = 1;
+        }
+    }
+
+    // Get value from the channel of VDD.
+    uint16_t sample = channels[probeChannel].getSample();
+
+    // Convert the result to voltage
+    // Result = [V(p) - V(n)] * GAIN/REFERENCE * 2^(RESOLUTION)
+    // Result = (VDD - 0) * ((1/6) / 0.6) * 2^14
+    // VDD = Result / 4551.1
+    return (float)sample / 4551.1f;
+}
